@@ -14,6 +14,7 @@ this repo fills the gap.
 | `flake.nix` | Flake entry point: `packages`, `overlays.default`, `nixosModules.default` |
 | `pkgs/ldk-server.nix` | `buildRustPackage` derivation (daemon + CLI), pinned to an upstream commit |
 | `modules/ldk-server.nix` | Standalone NixOS module, `services.ldk-server.instances.<name>` |
+| `examples/nixos-bitcoind-tor-only.nix` | **Vanilla NixOS only** (`services.bitcoind` + `services.tor`), Tor-only, no clearnet, cookie auth |
 | `examples/nix-bitcoin-tor-only.nix` | Single mainnet node on nix-bitcoin, Tor-only, no clearnet |
 | `examples/nix-bitcoin-clearnet.nix` | Single mainnet node on nix-bitcoin, clearnet (optionally dual-stack with Tor) |
 
@@ -52,6 +53,28 @@ sudo ldk-server-cli-main get-node-info   # per-instance CLI wrapper
 The package alone: `nix build github:sbddesign/ldk-server-nix` (or
 `.#ldk-server-lsps2` for the experimental LSPS2 service feature).
 
+### Without flakes (classic `configuration.nix`)
+
+```nix
+{ config, pkgs, ... }:
+let
+  ldk-server-nix = builtins.fetchTarball {
+    url = "https://github.com/sbddesign/ldk-server-nix/archive/<commit>.tar.gz";
+    # sha256 = "...";   # optional but recommended; nix-prefetch-url --unpack <url>
+  };
+in {
+  imports = [
+    "${ldk-server-nix}/modules/ldk-server.nix"
+    "${ldk-server-nix}/examples/nixos-bitcoind-tor-only.nix"   # or your own copy
+  ];
+  services.ldk-server.package = pkgs.callPackage "${ldk-server-nix}/pkgs/ldk-server.nix" { };
+}
+```
+
+Note the package then builds against *your* system's nixpkgs rather than
+the one pinned in this flake; if `cargoHash` mismatches, the build error
+prints the value to use.
+
 ## Module overview
 
 Each entry in `services.ldk-server.instances` gets its own system user,
@@ -66,9 +89,11 @@ Key options per instance:
   `node.alias`, `log.level`, ...) and free-form for everything else. See
   upstream's [annotated config](https://github.com/lightningdevkit/ldk-server/blob/main/contrib/ldk-server-config.toml).
   Never put secrets here; the file lands in the Nix store.
-- `bitcoind.{rpcAddress,rpcUser,rpcPasswordFile}` – Bitcoin Core chain
-  source. The password file is read by systemd (`LoadCredential`) and passed
-  via `LDK_SERVER_BITCOIND_RPC_PASSWORD`, so it never touches the store.
+- `bitcoind.rpcAddress` plus either `bitcoind.rpcCookieFile` (Bitcoin
+  Core's `.cookie`; zero secret management, pair with `partOf` on the
+  bitcoind unit) or `bitcoind.rpcUser` + `bitcoind.rpcPasswordFile`. Both
+  are read by systemd (`LoadCredential`) and passed as
+  `LDK_SERVER_BITCOIND_RPC_*` env vars, so nothing touches the Nix store.
 - `tor.enable` / `tor.proxyAddress` – outbound `.onion` peers via SOCKS.
 - `tor.onionService.{enable,port,announce}` – creates a v3 onion service via
   `services.tor.relay.onionServices` and, if `announce`, reads the generated
@@ -88,15 +113,17 @@ pathfinding-score downloads, and BIP-353 DNS lookups are *not* proxied.
 
 So for a Tor-only node:
 
-1. Use a local `bitcoind` chain source (nix-bitcoin makes bitcoind itself
-   Tor-only).
+1. Use a local `bitcoind` chain source, itself configured Tor-only
+   (`proxy=127.0.0.1:9050`, `onlynet=onion`, `listen=0`, `dns=0` on
+   vanilla NixOS; nix-bitcoin does this for you).
 2. Set `enforceLocalhostOnly = true`. This also disables the default
    pathfinding-scores download. Leave `rgs_server_url` unset; gossip syncs
    P2P from your onion peers instead (slower initially).
 3. Only peer with `.onion` addresses.
 
-`examples/nix-bitcoin-tor-only.nix` puts all of that together;
-`examples/nix-bitcoin-clearnet.nix` is the plain clearnet counterpart.
+`examples/nixos-bitcoind-tor-only.nix` (vanilla NixOS) and
+`examples/nix-bitcoin-tor-only.nix` (nix-bitcoin) put all of that together;
+`examples/nix-bitcoin-clearnet.nix` is a clearnet counterpart.
 
 ## Backups
 

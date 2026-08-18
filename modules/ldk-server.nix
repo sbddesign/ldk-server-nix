@@ -158,7 +158,23 @@ let
             File containing the Bitcoin Core RPC password. Read by systemd
             (as root) via `LoadCredential` and passed to the daemon through
             the `LDK_SERVER_BITCOIND_RPC_PASSWORD` environment variable, so
-            it never lands in the Nix store.
+            it never lands in the Nix store. Use with {option}`bitcoind.rpcUser`.
+          '';
+        };
+        rpcCookieFile = mkOption {
+          type = types.nullOr types.path;
+          default = null;
+          example = "/var/lib/bitcoind-main/.cookie";
+          description = ''
+            Bitcoin Core RPC cookie file (`<datadir>/.cookie`, or
+            `<datadir>/<network>/.cookie` for non-mainnet). Alternative to
+            {option}`bitcoind.rpcUser` + {option}`bitcoind.rpcPasswordFile`
+            that needs no manual secret management: systemd reads the cookie
+            via `LoadCredential` and the user/password are exported as
+            `LDK_SERVER_BITCOIND_RPC_USER` / `_PASSWORD`. Bitcoin Core writes
+            a new cookie on every start, so make the ldk-server unit
+            `partOf` the bitcoind unit (see the examples) so they restart
+            together.
           '';
         };
       };
@@ -247,6 +263,8 @@ let
         })
         (mkIf (config.bitcoind.rpcAddress != null) {
           bitcoind.rpc_address = config.bitcoind.rpcAddress;
+        })
+        (mkIf (config.bitcoind.rpcUser != null) {
           bitcoind.rpc_user = config.bitcoind.rpcUser;
         })
         (mkIf config.enforceLocalhostOnly {
@@ -268,6 +286,7 @@ let
       useOnion = inst.tor.enable && inst.tor.onionService.enable;
       announceOnion = useOnion && inst.tor.onionService.announce;
       loadRpcPassword = inst.bitcoind.rpcPasswordFile != null;
+      loadRpcCookie = inst.bitcoind.rpcCookieFile != null;
 
       # Announcement addresses are passed as repeated CLI flags (highest
       # precedence) so we can splice in the runtime-discovered onion address.
@@ -281,6 +300,12 @@ let
         ${optionalString loadRpcPassword ''
           LDK_SERVER_BITCOIND_RPC_PASSWORD="$(cat "$CREDENTIALS_DIRECTORY/bitcoind-rpc-password")"
           export LDK_SERVER_BITCOIND_RPC_PASSWORD
+        ''}
+        ${optionalString loadRpcCookie ''
+          cookie="$(cat "$CREDENTIALS_DIRECTORY/bitcoind-rpc-cookie")"
+          LDK_SERVER_BITCOIND_RPC_USER="''${cookie%%:*}"
+          LDK_SERVER_BITCOIND_RPC_PASSWORD="''${cookie#*:}"
+          export LDK_SERVER_BITCOIND_RPC_USER LDK_SERVER_BITCOIND_RPC_PASSWORD
         ''}
         ${optionalString announceOnion ''
           onion="$(cat "$CREDENTIALS_DIRECTORY/onion-hostname")"
@@ -351,6 +376,7 @@ let
           KillSignal = "SIGTERM";
           LoadCredential =
             optional loadRpcPassword "bitcoind-rpc-password:${inst.bitcoind.rpcPasswordFile}"
+            ++ optional loadRpcCookie "bitcoind-rpc-cookie:${inst.bitcoind.rpcCookieFile}"
             ++ optional announceOnion "onion-hostname:${onionHostnameFile}";
 
           # Hardening
@@ -391,12 +417,14 @@ let
           message = "services.ldk-server.instances.${name}: node.listening_addresses must not be empty.";
         }
         {
-          assertion = (inst.bitcoind.rpcAddress != null) -> (inst.bitcoind.rpcUser != null);
-          message = "services.ldk-server.instances.${name}: bitcoind.rpcUser must be set when bitcoind.rpcAddress is set.";
+          assertion = (inst.bitcoind.rpcAddress != null) ->
+            (inst.bitcoind.rpcCookieFile != null
+              || (inst.bitcoind.rpcUser != null && (inst.bitcoind.rpcPasswordFile != null || inst.environmentFile != null)));
+          message = "services.ldk-server.instances.${name}: with bitcoind.rpcAddress set, either set bitcoind.rpcCookieFile, or bitcoind.rpcUser plus bitcoind.rpcPasswordFile (or LDK_SERVER_BITCOIND_RPC_PASSWORD via environmentFile).";
         }
         {
-          assertion = (inst.bitcoind.rpcAddress != null) -> (inst.bitcoind.rpcPasswordFile != null || inst.environmentFile != null);
-          message = "services.ldk-server.instances.${name}: set bitcoind.rpcPasswordFile (or provide LDK_SERVER_BITCOIND_RPC_PASSWORD via environmentFile).";
+          assertion = !(inst.bitcoind.rpcCookieFile != null && (inst.bitcoind.rpcUser != null || inst.bitcoind.rpcPasswordFile != null));
+          message = "services.ldk-server.instances.${name}: bitcoind.rpcCookieFile is exclusive with bitcoind.rpcUser/rpcPasswordFile.";
         }
         {
           assertion = !(inst.enforceLocalhostOnly && inst.bitcoind.rpcAddress == null);
